@@ -1,0 +1,546 @@
+{
+  "name": "WhatsApp AI Agent - Qualify and Book (Cloud API + Claude)",
+  "nodes": [
+    {
+      "id": "1840efa9-3392-490c-a84a-8dff04e09f96",
+      "name": "Meta Verify (GET)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "1bb5245b-93df-41ea-bb66-0c5eed5491d1",
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "a62694da-dd56-4900-b8e0-a00667f339a8",
+      "name": "Verify Token Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        220,
+        0
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "leftValue": "",
+            "caseSensitive": true,
+            "typeValidation": "strict"
+          },
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "2b47e45c-39b5-4953-94cf-2971464fa418",
+              "leftValue": "={{ $json.query['hub.mode'] }}",
+              "rightValue": "subscribe",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            },
+            {
+              "id": "1a3fc3f1-b1b5-45a2-a8fe-172e16a9bbf2",
+              "leftValue": "={{ $json.query['hub.verify_token'] }}",
+              "rightValue": "YOUR_VERIFY_TOKEN",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "3727b14f-d4b6-4d40-9aaf-74145735b929",
+      "name": "Return Challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        460,
+        -100
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "f9df970b-78f6-4961-99b0-a7615a64186b",
+      "name": "Reject (403)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        460,
+        100
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "Forbidden",
+        "options": {
+          "responseCode": 403
+        }
+      }
+    },
+    {
+      "id": "ec3576d7-1eb9-48ba-9216-00d6a3165de4",
+      "name": "WhatsApp Inbound (POST)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        400
+      ],
+      "webhookId": "fe3d56cd-190c-441e-92ba-2b0cb296bfc0",
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp",
+        "responseMode": "onReceived",
+        "options": {}
+      }
+    },
+    {
+      "id": "ecd3af25-4dec-4a72-af1c-a96dac834feb",
+      "name": "Extract Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        400
+      ],
+      "parameters": {
+        "jsCode": "// Meta posts every WhatsApp event to the same webhook: inbound messages AND\n// delivery/read status updates. Keep only inbound messages; anything else\n// returns no items, so the rest of the workflow does not run.\nconst out = [];\n\nfor (const item of $input.all()) {\n  const body = item.json.body || {};\n  for (const entry of body.entry || []) {\n    for (const change of entry.changes || []) {\n      const value = change.value || {};\n      if (change.field !== 'messages' || !Array.isArray(value.messages)) continue;\n\n      const contact = (value.contacts || [])[0] || {};\n\n      for (const msg of value.messages) {\n        let text = '';\n        if (msg.type === 'text') {\n          text = msg.text?.body || '';\n        } else if (msg.type === 'interactive') {\n          text = msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';\n        } else if (msg.type === 'button') {\n          text = msg.button?.text || '';\n        } else {\n          text = '[The customer sent a ' + msg.type + ' message. You can only read text.]';\n        }\n\n        out.push({\n          json: {\n            from: msg.from,                       // customer's WhatsApp ID (phone number, no +)\n            name: contact.profile?.name || '',    // WhatsApp profile name\n            text,\n            messageId: msg.id,\n            timestamp: msg.timestamp,\n            phoneNumberId: value.metadata?.phone_number_id || '',\n          },\n        });\n      }\n    }\n  }\n}\n\nreturn out;"
+      }
+    },
+    {
+      "id": "748de07b-3afe-45b0-b9b7-97c0d809f2df",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 2.2,
+      "position": [
+        480,
+        400
+      ],
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.text }}",
+        "options": {
+          "systemMessage": "=You are the WhatsApp assistant for YOUR_BUSINESS_NAME. You talk to people who messaged the business on WhatsApp. Your job: find out what they need, check if it is a fit, and book a 30-minute call.\n\nContext\n- Current date and time: {{ $now.toISO() }} (timezone: {{ $now.zoneName }})\n- Customer WhatsApp name: {{ $json.name }}\n- Customer WhatsApp number: {{ $json.from }}\n- What we offer: YOUR_SERVICES (edit this line)\n- Working hours for calls: Monday to Friday, 10:00 to 18:00, in the timezone above\n\nHow to run the conversation\n1. Qualify first. Find out, one question at a time:\n   - what they need\n   - their rough budget\n   - their timeline\n   Do not ask for all three in one message.\n2. If what they need is something we do, and budget and timeline are workable, offer a call.\n   - Use the \"Check Availability\" tool for the next 5 working days, within working hours.\n   - It returns the busy slots. Pick 2 or 3 free 30-minute slots and offer them by day and time.\n   - Never offer a time you have not checked.\n3. When they pick a slot, use the \"Book Appointment\" tool.\n   - Summary: \"Call with <their name>\".\n   - Description: their need, budget, timeline and WhatsApp number.\n   Then confirm the day and time back to them.\n4. If the \"Save Lead\" tool is available, call it once the lead is qualified (booked or not).\n5. If it is not a fit, say so politely and say someone from the team may follow up.\n\nStyle\n- This is WhatsApp. Keep replies short: 1 to 3 sentences.\n- Plain text. No headings, no tables, no long lists.\n- Friendly and direct. Use their first name once you know it.\n- Never quote prices or promise outcomes. If asked, say the call is where that gets discussed.\n- If you are unsure or they ask for a person, say a team member will reply here.",
+          "maxIterations": 10
+        }
+      }
+    },
+    {
+      "id": "b7d4f3ad-2759-4fde-80d3-b752fb652998",
+      "name": "Claude Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1.3,
+      "position": [
+        300,
+        640
+      ],
+      "parameters": {
+        "model": {
+          "__rl": true,
+          "mode": "list",
+          "value": "claude-sonnet-5-5",
+          "cachedResultName": "Claude Sonnet 5.5"
+        },
+        "options": {
+          "maxTokensToSample": 1024,
+          "temperature": 0.3
+        }
+      },
+      "credentials": {
+        "anthropicApi": {
+          "name": "Anthropic account"
+        }
+      }
+    },
+    {
+      "id": "15988efc-fbb3-4242-a58f-ee1ad0320001",
+      "name": "Conversation Memory",
+      "type": "@n8n/n8n-nodes-langchain.memoryBufferWindow",
+      "typeVersion": 1.3,
+      "position": [
+        440,
+        640
+      ],
+      "parameters": {
+        "sessionIdType": "customKey",
+        "sessionKey": "={{ $('Extract Message').item.json.from }}",
+        "contextWindowLength": 10
+      }
+    },
+    {
+      "id": "bebab2af-02a6-4444-8315-61dde7c24421",
+      "name": "Check Availability",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        580,
+        640
+      ],
+      "parameters": {
+        "resource": "calendar",
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "primary"
+        },
+        "timeMin": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Start_Time', `Start of the window to check, ISO 8601 with timezone offset`, 'string') }}",
+        "timeMax": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('End_Time', `End of the window to check, ISO 8601 with timezone offset`, 'string') }}",
+        "options": {
+          "outputFormat": "bookedSlots"
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "id": "baeae841-3b11-4464-94e3-28c9fee2ff65",
+      "name": "Book Appointment",
+      "type": "n8n-nodes-base.googleCalendarTool",
+      "typeVersion": 1.3,
+      "position": [
+        720,
+        640
+      ],
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "mode": "id",
+          "value": "primary"
+        },
+        "start": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Start', `Start of the call, ISO 8601 with timezone offset`, 'string') }}",
+        "end": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('End', `End of the call (start + 30 minutes), ISO 8601 with timezone offset`, 'string') }}",
+        "additionalFields": {
+          "summary": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Summary', `Call with <customer name>`, 'string') }}",
+          "description": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Description', `Customer need, budget, timeline and WhatsApp number`, 'string') }}"
+        }
+      },
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "name": "Google Calendar account"
+        }
+      }
+    },
+    {
+      "id": "f2d6945f-72e3-4dd0-9408-fa1e45757bf1",
+      "name": "Save Lead",
+      "type": "n8n-nodes-base.googleSheetsTool",
+      "typeVersion": 4.5,
+      "position": [
+        860,
+        640
+      ],
+      "disabled": true,
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "YOUR_SPREADSHEET_ID"
+        },
+        "sheetName": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gid=0",
+          "cachedResultName": "Leads"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Date": "={{ $now.toISO() }}",
+            "WhatsApp Number": "={{ $('Extract Message').item.json.from }}",
+            "Name": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Name', `Customer name`, 'string') }}",
+            "Need": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Need', `What the customer needs, one line`, 'string') }}",
+            "Budget": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Budget', `Budget as stated by the customer`, 'string') }}",
+            "Timeline": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Timeline', `Timeline as stated by the customer`, 'string') }}",
+            "Status": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Status', `One of: qualified, booked, not a fit`, 'string') }}",
+            "Booked Slot": "={{ /*n8n-auto-generated-fromAI-override*/ $fromAI('Booked_Slot', `Booked start time in ISO 8601, or empty`, 'string') }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "Date",
+              "displayName": "Date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "WhatsApp Number",
+              "displayName": "WhatsApp Number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Name",
+              "displayName": "Name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Need",
+              "displayName": "Need",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Budget",
+              "displayName": "Budget",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Timeline",
+              "displayName": "Timeline",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Status",
+              "displayName": "Status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "Booked Slot",
+              "displayName": "Booked Slot",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "id": "0f1d6c2a-5b7e-4c39-9a8d-3e2f1b6c7d90",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        900,
+        400
+      ],
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v23.0/YOUR_PHONE_NUMBER_ID/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBearerAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ messaging_product: 'whatsapp', recipient_type: 'individual', to: $('Extract Message').item.json.from, type: 'text', text: { preview_url: false, body: $json.output } }) }}",
+        "options": {}
+      },
+      "credentials": {
+        "httpBearerAuth": {
+          "name": "WhatsApp Cloud API token"
+        }
+      }
+    },
+    {
+      "id": "6a2c9e41-7d3b-4f58-8e1a-2b9c0d4f5e63",
+      "name": "Note: Verification",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        -260
+      ],
+      "parameters": {
+        "width": 700,
+        "height": 200,
+        "color": 7,
+        "content": "## 1. Meta webhook verification (GET)\nMeta calls this once when you save the webhook URL in the App Dashboard.\nIf hub.verify_token matches YOUR_VERIFY_TOKEN (set it in \"Verify Token Matches?\"), we echo hub.challenge back. Otherwise 403."
+      }
+    },
+    {
+      "id": "9b4e1f27-3c6a-4d85-b0f2-7a1e8c3d5b46",
+      "name": "Note: Messages",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -60,
+        220
+      ],
+      "parameters": {
+        "width": 1160,
+        "height": 140,
+        "color": 7,
+        "content": "## 2. Inbound messages (POST)\nThe webhook answers 200 straight away so Meta does not retry. \"Extract Message\" drops status updates (sent/delivered/read) and keeps only real messages. The agent qualifies, checks the calendar, books, and the reply goes out through the Graph API."
+      }
+    }
+  ],
+  "connections": {
+    "Meta Verify (GET)": {
+      "main": [
+        [
+          {
+            "node": "Verify Token Matches?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Token Matches?": {
+      "main": [
+        [
+          {
+            "node": "Return Challenge",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Reject (403)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "WhatsApp Inbound (POST)": {
+      "main": [
+        [
+          {
+            "node": "Extract Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Message": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Agent": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation Memory": {
+      "ai_memory": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_memory",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Availability": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Book Appointment": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Lead": {
+      "ai_tool": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "active": false,
+  "tags": []
+}
